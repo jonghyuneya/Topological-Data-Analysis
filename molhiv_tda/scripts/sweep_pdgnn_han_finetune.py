@@ -42,9 +42,13 @@ def _ints(csv: str) -> list[int]:
     return [int(x) for x in csv.split(",") if x.strip()]
 
 
-def _combo_tag(lr, do, wd, hh, hl, hd, hdo) -> str:
+def _bools(csv: str) -> list[bool]:
+    return [x.strip() in ("1", "true", "True", "yes") for x in csv.split(",") if x.strip()]
+
+
+def _combo_tag(lr, do, wd, hh, hl, hd, hdo, bt) -> str:
     return (f"lr{lr:g}_do{do:g}_wd{wd:g}"
-            f"_hh{hh}_hl{hl}_hd{hd}_hdo{hdo:g}")
+            f"_hh{hh}_hl{hl}_hd{hd}_hdo{hdo:g}_bt{int(bt)}")
 
 
 def main():
@@ -64,6 +68,8 @@ def main():
     parser.add_argument("--han-layers", type=_ints, default=[2])
     parser.add_argument("--han-heads", type=_ints, default=[4])
     parser.add_argument("--han-dropouts", type=_floats, default=[0.2])
+    parser.add_argument("--balanced-trains", type=_bools, default=[False],
+                        help="Comma-separated 0/1: compare imbalanced (0) vs 1:1 balanced (1) training.")
     parser.add_argument("--rerun", action="store_true",
                         help="Re-run even if a result JSON already exists.")
     args = parser.parse_args()
@@ -77,6 +83,7 @@ def main():
     combos = list(itertools.product(
         args.lrs, args.dropouts, args.weight_decays,
         args.han_hiddens, args.han_layers, args.han_heads, args.han_dropouts,
+        args.balanced_trains,
     ))
     total = len(combos) * len(args.seeds)
     print(f"Sweeping {len(combos)} combos x {len(args.seeds)} seeds = {total} runs "
@@ -86,11 +93,12 @@ def main():
     aggregated: dict[str, dict] = {}
     run_i = 0
     for combo in combos:
-        lr, do, wd, hh, hl, hd, hdo = combo
+        lr, do, wd, hh, hl, hd, hdo, bt = combo
         tag = _combo_tag(*combo)
         aggregated[tag] = {"params": dict(
             lr=lr, dropout=do, weight_decay=wd,
             han_hidden=hh, han_layers=hl, han_heads=hd, han_dropout=hdo,
+            balanced_train=bt,
         ), "runs": []}
         for seed in args.seeds:
             run_i += 1
@@ -114,6 +122,8 @@ def main():
                     "--seed", str(seed),
                     "--out", str(out),
                 ]
+                if bt:
+                    cmd.append("--balanced-train")
                 print(f"[{run_i}/{total}] Running {tag} seed={seed}")
                 subprocess.run(cmd, cwd=PROJECT_ROOT, check=True)
 
@@ -136,13 +146,14 @@ def main():
         })
 
     rows.sort(key=lambda r: r["valid_mean"], reverse=True)
-    print("\n| lr | head do | wd | HAN h | L | heads | HAN do | seeds "
+    print("\n| lr | head do | wd | HAN h | L | heads | HAN do | 1:1 train | seeds "
           "| valid mean±std | test mean±std |")
-    print("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: | ---: |")
     for r in rows:
         print(f"| {r['lr']:g} | {r['dropout']:g} | {r['weight_decay']:g} "
               f"| {r['han_hidden']} | {r['han_layers']} | {r['han_heads']} "
-              f"| {r['han_dropout']:g} | {r['n_seeds']} "
+              f"| {r['han_dropout']:g} | {'yes' if r['balanced_train'] else 'no'} "
+              f"| {r['n_seeds']} "
               f"| {r['valid_mean']:.4f}±{r['valid_std']:.4f} "
               f"| {r['test_mean']:.4f}±{r['test_std']:.4f} |")
 

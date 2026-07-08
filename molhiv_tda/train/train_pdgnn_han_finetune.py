@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--han-layers", type=int, default=2)
     parser.add_argument("--han-heads", type=int, default=4)
     parser.add_argument("--han-dropout", type=float, default=0.2)
+    parser.add_argument("--balanced-train", action="store_true",
+                        help="Train with ~1:1 pos/neg per epoch (minority oversampling).")
     parser.add_argument("--out", type=str, default=None,
                         help="Output JSON path (default: results/{config}.json).")
     parser.add_argument("--save-ckpt", type=str, default=None,
@@ -124,6 +126,7 @@ def main():
         max_samples=args.max_samples,
         num_workers=args.num_workers if device.type == "cuda" else 0,
         edge_phys_bank=edge_phys_bank,
+        balanced_train=args.balanced_train,
     )
 
     model = PDGNNHANFinetune(
@@ -175,6 +178,7 @@ def main():
         "tda_3d": cfg["use_tda_3d"],
         "electro_edge": cfg["use_edge_electro"],
         "balanced_test_eval": cfg["balance_test"],
+        "balanced_train": args.balanced_train,
         "config": args.config,
         "lr": args.lr,
         "dropout": args.dropout,

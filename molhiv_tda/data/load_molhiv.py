@@ -118,6 +118,37 @@ class IndexedGraphDataset(torch.utils.data.Dataset):
         return data
 
 
+def _train_label_tensor(
+    dataset: PygGraphPropPredDataset, indices: Sequence[int]
+) -> torch.Tensor:
+    """Return binary labels (long) for the given graph indices."""
+    y_all = getattr(getattr(dataset, "data", None), "y", None)
+    if y_all is not None and y_all.size(0) == len(dataset):
+        labels = y_all.view(-1)[torch.as_tensor(indices, dtype=torch.long)]
+    else:  # Fallback: read per-graph labels one by one.
+        labels = torch.tensor(
+            [int(dataset[i].y.view(-1)[0].item()) for i in indices], dtype=torch.long
+        )
+    return labels.long()
+
+
+def _balanced_sampler(
+    dataset: PygGraphPropPredDataset, indices: Sequence[int]
+) -> "torch.utils.data.WeightedRandomSampler":
+    """Weighted sampler that draws ~1:1 positive/negative per epoch (oversampling)."""
+    from torch.utils.data import WeightedRandomSampler
+
+    labels = _train_label_tensor(dataset, indices)
+    class_count = torch.bincount(labels, minlength=2).float().clamp_min(1.0)
+    class_weight = 1.0 / class_count  # inverse-frequency -> balanced draws
+    sample_weights = class_weight[labels]
+    return WeightedRandomSampler(
+        weights=sample_weights.double(),
+        num_samples=len(labels),
+        replacement=True,
+    )
+
+
 def make_loaders(
     dataset: PygGraphPropPredDataset,
     split_idx: Dict[str, torch.Tensor],
@@ -125,18 +156,27 @@ def make_loaders(
     num_workers: int = 0,
     max_samples: int | None = None,
     edge_phys_bank: Optional[list[torch.Tensor]] = None,
+    balanced_train: bool = False,
 ):
-    """Create train/valid/test DataLoaders using official OGB split."""
+    """Create train/valid/test DataLoaders using official OGB split.
+
+    When ``balanced_train`` is True the train loader uses a WeightedRandomSampler so
+    each epoch sees roughly a 1:1 positive/negative ratio (minority oversampling).
+    Valid/test loaders are never balanced (evaluated on the real distribution).
+    """
     loaders = {}
     for split in ("train", "valid", "test"):
         indices = split_idx[split].tolist()
         if max_samples is not None:
             indices = indices[:max_samples]
         subset = IndexedGraphDataset(dataset, indices, edge_phys_bank=edge_phys_bank)
+        use_balanced = balanced_train and split == "train"
+        sampler = _balanced_sampler(dataset, indices) if use_balanced else None
         loaders[split] = DataLoader(
             subset,
             batch_size=batch_size,
-            shuffle=(split == "train"),
+            shuffle=(split == "train" and sampler is None),
+            sampler=sampler,
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
         )

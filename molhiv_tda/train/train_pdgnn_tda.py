@@ -95,6 +95,11 @@ def main():
         default=None,
         help="If set, save the best model state_dict to this path (e.g. results/pdgnn_tda_3d_elec_best.pt).",
     )
+    parser.add_argument(
+        "--balanced-train",
+        action="store_true",
+        help="Train with ~1:1 pos/neg per epoch (minority oversampling).",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -108,6 +113,7 @@ def main():
         batch_size=args.batch_size,
         max_samples=args.max_samples,
         num_workers=args.num_workers if device.type == "cuda" else 0,
+        balanced_train=args.balanced_train,
     )
 
     bond_tda = load_feature_tensor(BOND_TDA_CACHE, len(dataset), BOND_TDA_DIM) if cfg.get("use_bond_tda") else None
@@ -167,6 +173,7 @@ def main():
                 max_samples=args.max_samples,
                 num_workers=args.num_workers if device.type == "cuda" else 0,
                 edge_phys_bank=edge_phys_bank,
+                balanced_train=args.balanced_train,
             )
 
     metrics = run_training(
@@ -196,6 +203,7 @@ def main():
         "edge_dist_filtration": cfg.get("use_edge_dist", False),
         "electro_edge": cfg.get("use_edge_electro", False),
         "balanced_test_eval": cfg.get("balance_test", False),
+        "balanced_train": args.balanced_train,
         "config": args.config,
         "lr": args.lr,
         "dropout": args.dropout,
