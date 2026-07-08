@@ -1,11 +1,12 @@
-"""Fine-tuning model: frozen PDGNN(+TDA) backbone + a lightweight bond-relation
+"""Fine-tuning model: frozen PDGNN(+TDA) backbone + a lightweight heterogeneous
 HAN branch fused at the node level (before add-pooling).
 
 Design summary (see project brief for the approved decisions):
 - The PDGNN backbone (AtomEncoder, PDConv stack, edge_phys_proj) is loaded from a
   pretrained checkpoint and fully frozen. It acts purely as a feature extractor.
-- A HAN branch produces per-node embeddings h_han[N, H] using bond types as
-  heterogeneous relations, operating directly on the homogeneous edge_index /
+- A HAN branch produces per-node embeddings h_han[N, H] treating atom elements as
+  heterogeneous NODE TYPES (type-specific projection + type embedding) and bond
+  types as edge RELATIONS, operating directly on the homogeneous edge_index /
   edge_attr (no heavy HeteroData conversion).
 - Fusion happens at the PDGNN encode() point right before global_add_pool: the
   backbone's node features x[N, 600] are concatenated with a gated HAN output
@@ -43,6 +44,52 @@ from models.pdgnn_tda import PDGNNTDA
 
 # OGB bond-type relations (edge_attr[:, 0]): single, double, triple, aromatic, misc.
 NUM_BOND_RELATIONS = 5
+
+# Atom types treated as heterogeneous NODE TYPES. OGB encodes x[:, 0] as an index
+# into possible_atomic_num_list = list(range(1, 119)) + ['misc'], i.e. the feature
+# index equals (atomic_number - 1). We keep the common drug-like elements as
+# distinct node types and bucket everything else into a single "other" type.
+_ELEMENT_ATOMIC_NUMS = [6, 7, 8, 16, 9, 17, 35, 53, 15, 5, 14, 34]  # C N O S F Cl Br I P B Si Se
+_OTHER_NODE_TYPE = len(_ELEMENT_ATOMIC_NUMS)
+NUM_NODE_TYPES = len(_ELEMENT_ATOMIC_NUMS) + 1  # curated elements + "other"
+_ATOM_FEATURE_INDEX_SIZE = 119  # |possible_atomic_num_list| (118 elements + misc)
+
+
+def _build_atom_type_lut() -> torch.Tensor:
+    """Lookup table mapping the OGB atom feature index (x[:, 0]) -> node type id."""
+    lut = torch.full((_ATOM_FEATURE_INDEX_SIZE,), _OTHER_NODE_TYPE, dtype=torch.long)
+    for type_id, atomic_num in enumerate(_ELEMENT_ATOMIC_NUMS):
+        lut[atomic_num - 1] = type_id  # feature index == atomic_num - 1
+    return lut
+
+
+class TypedNodeProjection(nn.Module):
+    """Project atoms into a shared space with per-node-type (per-element) transforms.
+
+    This is what turns the branch into a genuine *heterogeneous* graph network:
+    atoms of different elements are distinct node types, each with its own linear
+    transformation plus a learned type embedding (HAN's type-specific projection
+    step, which maps heterogeneous node features into a common latent space).
+    """
+
+    def __init__(self, hidden_dim: int, num_node_types: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_node_types = num_node_types
+        self.atom_encoder = AtomEncoder(hidden_dim)
+        self.type_proj = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(num_node_types)]
+        )
+        self.type_emb = nn.Embedding(num_node_types, hidden_dim)
+
+    def forward(self, x_feat: torch.Tensor, node_type: torch.Tensor) -> torch.Tensor:
+        h = self.atom_encoder(x_feat)  # [N, H] shared atom-feature encoding
+        out = h.new_zeros(h.shape)
+        for t in range(self.num_node_types):
+            mask = node_type == t
+            if mask.any():
+                out[mask] = self.type_proj[t](h[mask])
+        return out + self.type_emb(node_type)
 
 
 class RelationGATConv(nn.Module):
@@ -120,10 +167,13 @@ class HANLayer(nn.Module):
 
 
 class BondRelationHAN(nn.Module):
-    """Lightweight HAN over bond-type relations, producing per-node embeddings.
+    """Heterogeneous HAN: atom types as NODE TYPES, bond types as edge RELATIONS.
 
-    Reuses the incoming homogeneous edge_index/edge_attr; the relation for each
-    edge is edge_attr[:, 0] (the OGB bond type). Output: h_han[N, hidden_dim].
+    Node types come from the element of each atom (x[:, 0]); a type-specific
+    projection + type embedding maps the different node types into a shared space.
+    Edge relations come from the bond type (edge_attr[:, 0]). The branch reuses the
+    incoming homogeneous edge_index/edge_attr directly (no HeteroData conversion).
+    Output: h_han[N, hidden_dim].
     """
 
     def __init__(
@@ -133,11 +183,14 @@ class BondRelationHAN(nn.Module):
         heads: int = 4,
         dropout: float = 0.2,
         num_relations: int = NUM_BOND_RELATIONS,
+        num_node_types: int = NUM_NODE_TYPES,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_relations = num_relations
-        self.atom_encoder = AtomEncoder(hidden_dim)
+        self.num_node_types = num_node_types
+        self.input_proj = TypedNodeProjection(hidden_dim, num_node_types)
+        self.register_buffer("atom_type_lut", _build_atom_type_lut())
         self.layers = nn.ModuleList(
             [HANLayer(hidden_dim, num_relations, heads, dropout) for _ in range(num_layers)]
         )
@@ -145,7 +198,9 @@ class BondRelationHAN(nn.Module):
 
     def forward(self, batch) -> torch.Tensor:
         num_nodes = batch.x.size(0)
-        x = self.atom_encoder(batch.x)
+        atom_idx = batch.x[:, 0].long().clamp(0, self.atom_type_lut.numel() - 1)
+        node_type = self.atom_type_lut[atom_idx]
+        x = self.input_proj(batch.x, node_type)
         edge_type = batch.edge_attr[:, 0].long().clamp(0, self.num_relations - 1)
         for layer in self.layers:
             x = layer(x, batch.edge_index, edge_type, num_nodes)
