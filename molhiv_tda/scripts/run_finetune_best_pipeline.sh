@@ -10,10 +10,16 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."  # -> molhiv_tda project root
-SWEEP_DIR="results/sweep/pdgnn_han_finetune_3d_elec_hantune"
+CONFIG="${CONFIG:-pdgnn_han_finetune_3d_elec}"
+SWEEP_DIR="results/sweep/${CONFIG}_hantune"
 SUMMARY="$SWEEP_DIR/_summary.json"
 BACKBONE_CKPT="results/pdgnn_tda_3d_elec_best.pt"
 EPOCHS="${EPOCHS:-30}"
+CKPT_OUT="${CKPT_OUT:-results/${CONFIG}_best.pt}"
+JSON_OUT="${JSON_OUT:-results/${CONFIG}_best.json}"
+# Pass --multifilt to the evaluator when the config carries the A+B lenses.
+MULTIFILT_FLAG=""
+[[ "$CONFIG" == *multifilt* ]] && MULTIFILT_FLAG="--multifilt"
 
 echo ">> [$(date -u +%H:%M:%S)] waiting for sweep to finish..."
 while pgrep -f "[s]weep_pdgnn_han_finetune.py" >/dev/null 2>&1; do
@@ -35,16 +41,16 @@ BAL=""
 [ "$BT" = "1" ] && BAL="--balanced-train"
 
 echo ">> [$(date -u +%H:%M:%S)] retraining best with --save-ckpt (epochs=$EPOCHS)..."
-python -u train/train_pdgnn_han_finetune.py --config pdgnn_han_finetune_3d_elec \
+python -u train/train_pdgnn_han_finetune.py --config "$CONFIG" \
   --backbone-ckpt "$BACKBONE_CKPT" --lr "$LR" --dropout "$DO" \
   --han-hidden "$HH" --han-layers "$HL" --han-heads "$HD" --han-dropout "$HDO" \
   $BAL --epochs "$EPOCHS" --seed 0 --device cuda \
-  --out results/pdgnn_han_finetune_best.json \
-  --save-ckpt results/pdgnn_han_finetune_best.pt
+  --out "$JSON_OUT" \
+  --save-ckpt "$CKPT_OUT"
 
 echo ">> [$(date -u +%H:%M:%S)] multi-seed test evaluation of the fine-tune checkpoint..."
 python -u scripts/eval_pdgnn_han_finetune_ckpt.py \
-  --ckpt results/pdgnn_han_finetune_best.pt \
+  --ckpt "$CKPT_OUT" $MULTIFILT_FLAG \
   --han-hidden "$HH" --han-layers "$HL" --han-heads "$HD" --han-dropout "$HDO" \
   --dropout "$DO" --balance-seeds 30
 

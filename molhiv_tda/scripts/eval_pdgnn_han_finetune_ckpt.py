@@ -27,7 +27,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import torch
 
 from config import (
-    BATCH_SIZE, BOND_TDA_DIM, BOND_TDA_CACHE, EMB_DIM, EDGE_ELECTRO_CACHE,
+    AROMATIC_RIPS_TDA_CACHE, BATCH_SIZE, BOND_TDA_DIM, BOND_TDA_CACHE, EMB_DIM,
+    EDGE_ELECTRO_CACHE, GRAPH_RIPS_DIM, GRAPH_RIPS_TDA_CACHE,
     NUM_BACKBONE_LAYERS, TDA_3D_CACHE, TDA_3D_DIM,
 )
 from data.load_molhiv import load_feature_tensor, load_molhiv, make_loaders
@@ -46,6 +47,8 @@ def main():
     parser.add_argument("--han-heads", type=int, default=4)
     parser.add_argument("--han-dropout", type=float, default=0.2)
     parser.add_argument("--balance-seeds", type=int, default=30)
+    parser.add_argument("--multifilt", action="store_true",
+                        help="Checkpoint includes multifiltration lenses A+B (graph_tda).")
     args = parser.parse_args()
 
     device = resolve_device(args.device)
@@ -56,6 +59,14 @@ def main():
     tda_3d = load_feature_tensor(TDA_3D_CACHE, len(dataset), TDA_3D_DIM)
     obj = torch.load(EDGE_ELECTRO_CACHE, weights_only=False)
     edge_phys_bank = obj["edge_phys"] if isinstance(obj, dict) else obj
+
+    graph_tda = None
+    graph_tda_dim = 0
+    if args.multifilt:
+        lens_a = load_feature_tensor(GRAPH_RIPS_TDA_CACHE, len(dataset), GRAPH_RIPS_DIM)
+        lens_b = load_feature_tensor(AROMATIC_RIPS_TDA_CACHE, len(dataset), GRAPH_RIPS_DIM)
+        graph_tda = torch.cat([lens_a, lens_b], dim=1)
+        graph_tda_dim = graph_tda.shape[1]
 
     loaders = make_loaders(
         dataset, split_idx, batch_size=BATCH_SIZE, num_workers=2,
@@ -69,6 +80,7 @@ def main():
         dropout=args.dropout, use_bond_tda=True, bond_tda_dim=BOND_TDA_DIM,
         use_mw=False, use_tda_3d=True, tda_3d_dim=TDA_3D_DIM,
         use_edge_electro=True, edge_phys_dim=2,
+        use_graph_tda=args.multifilt, graph_tda_dim=graph_tda_dim,
         han_hidden=args.han_hidden, han_layers=args.han_layers,
         han_heads=args.han_heads, han_dropout=args.han_dropout,
         backbone_ckpt=None,
@@ -76,7 +88,7 @@ def main():
     model.load_state_dict(torch.load(args.ckpt, map_location=device))
     model.eval()
 
-    common = dict(bond_tda=bond_tda, mw=None, tda_3d=tda_3d)
+    common = dict(bond_tda=bond_tda, mw=None, tda_3d=tda_3d, graph_tda=graph_tda)
     valid_full = evaluate_model(model, loaders["valid"], evaluator, device, **common)["rocauc"]
     test_full = evaluate_model(model, loaders["test"], evaluator, device, **common)["rocauc"]
 

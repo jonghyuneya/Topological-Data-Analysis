@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import torch
 
 from config import (
+    AROMATIC_RIPS_TDA_CACHE,
     BATCH_SIZE,
     BOND_TDA_DIM,
     BOND_TDA_CACHE,
@@ -32,6 +33,8 @@ from config import (
     EMB_DIM,
     EDGE_ELECTRO_CACHE,
     EPOCHS,
+    GRAPH_RIPS_DIM,
+    GRAPH_RIPS_TDA_CACHE,
     MW_CACHE,
     NUM_BACKBONE_LAYERS,
     NUM_WORKERS,
@@ -55,8 +58,20 @@ CONFIGS = {
         use_mw=False,
         use_tda_3d=True,
         use_edge_electro=True,
+        use_graph_tda=False,
         balance_test=True,
         label="PDGNN(frozen) + HAN node fusion + BondTDA + 3DTDA + ElectroEdge",
+    ),
+    # Same as above + multifiltration lenses A (full-graph hop-Rips) and B
+    # (aromatic-subgraph hop-Rips) concatenated into the head (graph_tda channel).
+    "pdgnn_han_finetune_3d_elec_multifilt": dict(
+        use_bond_tda=True,
+        use_mw=False,
+        use_tda_3d=True,
+        use_edge_electro=True,
+        use_graph_tda=True,
+        balance_test=True,
+        label="PDGNN(frozen) + HAN node fusion + BondTDA + 3DTDA + ElectroEdge + Multifiltration(A+B)",
     ),
 }
 
@@ -111,6 +126,20 @@ def main():
     if cfg["use_tda_3d"] and not TDA_3D_CACHE.exists():
         raise FileNotFoundError(f"Missing {TDA_3D_CACHE}. Run scripts/preprocess_3d_tda.py first.")
 
+    # Multifiltration lenses A (full-graph hop-Rips) + B (aromatic hop-Rips).
+    graph_tda = None
+    graph_tda_dim = 0
+    if cfg.get("use_graph_tda", False):
+        for cache in (GRAPH_RIPS_TDA_CACHE, AROMATIC_RIPS_TDA_CACHE):
+            if not cache.exists():
+                raise FileNotFoundError(
+                    f"Missing {cache}. Run scripts/preprocess_graph_rips_tda.py first."
+                )
+        lens_a = load_feature_tensor(GRAPH_RIPS_TDA_CACHE, len(dataset), GRAPH_RIPS_DIM)
+        lens_b = load_feature_tensor(AROMATIC_RIPS_TDA_CACHE, len(dataset), GRAPH_RIPS_DIM)
+        graph_tda = torch.cat([lens_a, lens_b], dim=1)
+        graph_tda_dim = graph_tda.shape[1]
+
     edge_phys_bank = None
     if cfg["use_edge_electro"]:
         if not EDGE_ELECTRO_CACHE.exists():
@@ -141,6 +170,8 @@ def main():
         tda_3d_dim=TDA_3D_DIM,
         use_edge_electro=cfg["use_edge_electro"],
         edge_phys_dim=2,
+        use_graph_tda=cfg.get("use_graph_tda", False),
+        graph_tda_dim=graph_tda_dim,
         han_hidden=args.han_hidden,
         han_layers=args.han_layers,
         han_heads=args.han_heads,
@@ -164,6 +195,7 @@ def main():
         bond_tda=bond_tda,
         mw=mw,
         tda_3d=tda_3d,
+        graph_tda=graph_tda,
         balance_test=cfg["balance_test"],
         test_balance_seed=args.seed,
         save_ckpt=args.save_ckpt,
@@ -177,6 +209,8 @@ def main():
         "molecular_weight": cfg["use_mw"],
         "tda_3d": cfg["use_tda_3d"],
         "electro_edge": cfg["use_edge_electro"],
+        "multifiltration": cfg.get("use_graph_tda", False),
+        "graph_tda_dim": graph_tda_dim,
         "balanced_test_eval": cfg["balance_test"],
         "balanced_train": args.balanced_train,
         "config": args.config,

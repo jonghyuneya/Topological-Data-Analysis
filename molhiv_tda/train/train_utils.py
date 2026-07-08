@@ -36,6 +36,7 @@ def evaluate_model(
     bond_tda: Optional[torch.Tensor] = None,
     mw: Optional[torch.Tensor] = None,
     tda_3d: Optional[torch.Tensor] = None,
+    graph_tda: Optional[torch.Tensor] = None,
     edge_dist_bank: Optional[list[torch.Tensor]] = None,
     balance_binary: bool = False,
     balance_seed: int = 0,
@@ -46,13 +47,14 @@ def evaluate_model(
     bond_tda = bond_tda.to(device) if bond_tda is not None else None
     mw = mw.to(device) if mw is not None else None
     tda_3d = tda_3d.to(device) if tda_3d is not None else None
+    graph_tda = graph_tda.to(device) if graph_tda is not None else None
     y_true = []
     y_pred = []
 
     for batch in loader:
         batch = batch.to(device)
         pred = _forward_model(
-            model, batch, bond_tda, mw, tda_3d, edge_dist_bank
+            model, batch, bond_tda, mw, tda_3d, edge_dist_bank, graph_tda
         )
 
         y_true.append(batch.y.view(batch.y.size(0), -1).detach().cpu())
@@ -94,6 +96,7 @@ def _forward_model(
     mw,
     tda_3d,
     edge_dist_bank,
+    graph_tda=None,
 ):
     """Feature banks are expected to already live on the batch's device."""
     if edge_dist_bank is not None:
@@ -107,6 +110,8 @@ def _forward_model(
         kwargs["mw"] = gather_graph_features(batch, mw)
     if tda_3d is not None:
         kwargs["tda_3d"] = gather_graph_features(batch, tda_3d)
+    if graph_tda is not None:
+        kwargs["graph_tda"] = gather_graph_features(batch, graph_tda)
     if kwargs:
         return model(batch, **kwargs)
     return model(batch)
@@ -120,6 +125,7 @@ def train_one_epoch(
     bond_tda: Optional[torch.Tensor] = None,
     mw: Optional[torch.Tensor] = None,
     tda_3d: Optional[torch.Tensor] = None,
+    graph_tda: Optional[torch.Tensor] = None,
     edge_dist_bank: Optional[list[torch.Tensor]] = None,
 ) -> float:
     model.train()
@@ -127,6 +133,7 @@ def train_one_epoch(
     bond_tda = bond_tda.to(device) if bond_tda is not None else None
     mw = mw.to(device) if mw is not None else None
     tda_3d = tda_3d.to(device) if tda_3d is not None else None
+    graph_tda = graph_tda.to(device) if graph_tda is not None else None
     total_loss = 0.0
     total_graphs = 0
 
@@ -135,7 +142,7 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         pred = _forward_model(
-            model, batch, bond_tda, mw, tda_3d, edge_dist_bank
+            model, batch, bond_tda, mw, tda_3d, edge_dist_bank, graph_tda
         )
 
         is_labeled = batch.y == batch.y
@@ -164,6 +171,7 @@ def run_training(
     bond_tda: Optional[torch.Tensor] = None,
     mw: Optional[torch.Tensor] = None,
     tda_3d: Optional[torch.Tensor] = None,
+    graph_tda: Optional[torch.Tensor] = None,
     edge_dist_bank: Optional[list[torch.Tensor]] = None,
     balance_test: bool = False,
     test_balance_seed: int = 0,
@@ -177,6 +185,7 @@ def run_training(
     bond_tda = bond_tda.to(device) if bond_tda is not None else None
     mw = mw.to(device) if mw is not None else None
     tda_3d = tda_3d.to(device) if tda_3d is not None else None
+    graph_tda = graph_tda.to(device) if graph_tda is not None else None
     best_valid = -1.0
     best_test = -1.0
     best_state = None
@@ -191,6 +200,7 @@ def run_training(
             bond_tda=bond_tda,
             mw=mw,
             tda_3d=tda_3d,
+            graph_tda=graph_tda,
             edge_dist_bank=edge_dist_bank,
         )
         valid_score = evaluate_model(
@@ -201,6 +211,7 @@ def run_training(
             bond_tda=bond_tda,
             mw=mw,
             tda_3d=tda_3d,
+            graph_tda=graph_tda,
             edge_dist_bank=edge_dist_bank,
         )["rocauc"]
 
@@ -214,6 +225,7 @@ def run_training(
                 bond_tda=bond_tda,
                 mw=mw,
                 tda_3d=tda_3d,
+                graph_tda=graph_tda,
                 edge_dist_bank=edge_dist_bank,
                 balance_binary=balance_test,
                 balance_seed=test_balance_seed + epoch,

@@ -224,6 +224,8 @@ class PDGNNHANFinetune(nn.Module):
         tda_3d_dim: int = 75,
         use_edge_electro: bool = True,
         edge_phys_dim: int = 2,
+        use_graph_tda: bool = False,
+        graph_tda_dim: int = 0,
         han_hidden: int = 128,
         han_layers: int = 2,
         han_heads: int = 4,
@@ -234,6 +236,7 @@ class PDGNNHANFinetune(nn.Module):
         self.use_bond_tda = use_bond_tda
         self.use_mw = use_mw
         self.use_tda_3d = use_tda_3d
+        self.use_graph_tda = use_graph_tda
 
         # Backbone with the exact same config as the pretrained checkpoint so the
         # state_dict loads cleanly. Its own head is kept but unused (and frozen).
@@ -272,6 +275,11 @@ class PDGNNHANFinetune(nn.Module):
             extra_dim += 1
         if use_tda_3d:
             extra_dim += tda_3d_dim
+        # Multifiltration lenses (graph/aromatic hop-distance Rips) feed only the
+        # new head; they never touch the frozen backbone, so the checkpoint still
+        # loads cleanly with its original TDA dims.
+        if use_graph_tda:
+            extra_dim += graph_tda_dim
 
         head_in = graph_dim + han_hidden + extra_dim
         self.head = nn.Sequential(
@@ -298,6 +306,7 @@ class PDGNNHANFinetune(nn.Module):
         bond_tda: torch.Tensor | None = None,
         mw: torch.Tensor | None = None,
         tda_3d: torch.Tensor | None = None,
+        graph_tda: torch.Tensor | None = None,
     ):
         # Frozen PDGNN node features (pre-pool), no grad.
         with torch.no_grad():
@@ -320,5 +329,9 @@ class PDGNNHANFinetune(nn.Module):
             if tda_3d is None:
                 raise ValueError("3D TDA features required but not provided")
             extras.append(tda_3d)
+        if self.use_graph_tda:
+            if graph_tda is None:
+                raise ValueError("multifiltration (graph/aromatic Rips) features required but not provided")
+            extras.append(graph_tda)
 
         return self.head(torch.cat(extras, dim=1))
