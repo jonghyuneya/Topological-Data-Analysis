@@ -28,6 +28,7 @@ import json
 import statistics
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,49 @@ def _combo_tag(lr, do, wd, hh, hl, hd, hdo, bt) -> str:
             f"_hh{hh}_hl{hl}_hd{hd}_hdo{hdo:g}_bt{int(bt)}")
 
 
+def _run_pool(jobs, max_parallel: int):
+    """Run (cmd, log_path) jobs with at most max_parallel concurrent subprocesses.
+
+    Each job's stdout/stderr is redirected to its own log file so concurrent runs
+    don't interleave. Raises RuntimeError if any job exits non-zero.
+    """
+    pending = list(jobs)
+    running = []  # list of (Popen, log_file_handle, cmd, log_path)
+    failures = []
+    total = len(pending)
+    started = 0
+
+    while pending or running:
+        while pending and len(running) < max_parallel:
+            cmd, log_path = pending.pop(0)
+            started += 1
+            print(f"[start {started}/{total}] -> {Path(log_path).name}", flush=True)
+            fh = open(log_path, "w", encoding="utf-8")
+            proc = subprocess.Popen(cmd, cwd=PROJECT_ROOT, stdout=fh, stderr=subprocess.STDOUT)
+            running.append((proc, fh, cmd, log_path))
+
+        time.sleep(3)
+        still = []
+        for proc, fh, cmd, log_path in running:
+            ret = proc.poll()
+            if ret is None:
+                still.append((proc, fh, cmd, log_path))
+                continue
+            fh.close()
+            if ret != 0:
+                failures.append((cmd, log_path, ret))
+                print(f"[FAIL rc={ret}] see {log_path}", flush=True)
+            else:
+                print(f"[done] {Path(log_path).name}", flush=True)
+        running = still
+
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} run(s) failed: "
+            + "; ".join(f"{Path(lp).name}(rc={rc})" for _, lp, rc in failures)
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="pdgnn_han_finetune_3d_elec")
@@ -70,6 +114,10 @@ def main():
     parser.add_argument("--han-dropouts", type=_floats, default=[0.2])
     parser.add_argument("--balanced-trains", type=_bools, default=[False],
                         help="Comma-separated 0/1: compare imbalanced (0) vs 1:1 balanced (1) training.")
+    parser.add_argument("--max-parallel", type=int, default=1,
+                        help="Number of runs to execute concurrently on the GPU.")
+    parser.add_argument("--per-run-workers", type=int, default=2,
+                        help="DataLoader workers per run (keep low when running in parallel).")
     parser.add_argument("--rerun", action="store_true",
                         help="Re-run even if a result JSON already exists.")
     args = parser.parse_args()
@@ -89,9 +137,13 @@ def main():
     print(f"Sweeping {len(combos)} combos x {len(args.seeds)} seeds = {total} runs "
           f"(config={args.config}, epochs={args.epochs})")
 
-    # combo_tag -> {"params": {...}, "runs": [result dict per seed]}
+    logs_dir = sweep_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build job list (skipping already-computed runs) then execute via a pool.
+    # combo_tag -> {"params": {...}, "outs": [out paths per seed]}
     aggregated: dict[str, dict] = {}
-    run_i = 0
+    jobs = []  # (cmd, log_path)
     for combo in combos:
         lr, do, wd, hh, hl, hd, hdo, bt = combo
         tag = _combo_tag(*combo)
@@ -99,36 +151,46 @@ def main():
             lr=lr, dropout=do, weight_decay=wd,
             han_hidden=hh, han_layers=hl, han_heads=hd, han_dropout=hdo,
             balanced_train=bt,
-        ), "runs": []}
+        ), "outs": []}
         for seed in args.seeds:
-            run_i += 1
             out = sweep_dir / f"{tag}_s{seed}.json"
+            aggregated[tag]["outs"].append(out)
             if out.exists() and not args.rerun:
-                print(f"[{run_i}/{total}] Skipping {out.name} (exists)")
-            else:
-                cmd = [
-                    sys.executable, str(PROJECT_ROOT / "train" / "train_pdgnn_han_finetune.py"),
-                    "--config", args.config,
-                    "--backbone-ckpt", args.backbone_ckpt,
-                    "--lr", str(lr),
-                    "--dropout", str(do),
-                    "--weight-decay", str(wd),
-                    "--han-hidden", str(hh),
-                    "--han-layers", str(hl),
-                    "--han-heads", str(hd),
-                    "--han-dropout", str(hdo),
-                    "--epochs", str(args.epochs),
-                    "--device", args.device,
-                    "--seed", str(seed),
-                    "--out", str(out),
-                ]
-                if bt:
-                    cmd.append("--balanced-train")
-                print(f"[{run_i}/{total}] Running {tag} seed={seed}")
-                subprocess.run(cmd, cwd=PROJECT_ROOT, check=True)
+                print(f"Skipping {out.name} (exists)")
+                continue
+            cmd = [
+                sys.executable, "-u",
+                str(PROJECT_ROOT / "train" / "train_pdgnn_han_finetune.py"),
+                "--config", args.config,
+                "--backbone-ckpt", args.backbone_ckpt,
+                "--lr", str(lr),
+                "--dropout", str(do),
+                "--weight-decay", str(wd),
+                "--han-hidden", str(hh),
+                "--han-layers", str(hl),
+                "--han-heads", str(hd),
+                "--han-dropout", str(hdo),
+                "--epochs", str(args.epochs),
+                "--device", args.device,
+                "--seed", str(seed),
+                "--num-workers", str(args.per_run_workers),
+                "--out", str(out),
+            ]
+            if bt:
+                cmd.append("--balanced-train")
+            jobs.append((cmd, str(logs_dir / f"{tag}_s{seed}.log")))
 
+    print(f"{len(jobs)} run(s) to execute, {total - len(jobs)} already cached; "
+          f"max_parallel={args.max_parallel}")
+    if jobs:
+        _run_pool(jobs, max(1, args.max_parallel))
+
+    # Aggregate every combo's per-seed result JSONs.
+    for tag, info in aggregated.items():
+        info["runs"] = []
+        for out in info["outs"]:
             with open(out, encoding="utf-8") as f:
-                aggregated[tag]["runs"].append(json.load(f))
+                info["runs"].append(json.load(f))
 
     rows = []
     for tag, info in aggregated.items():
