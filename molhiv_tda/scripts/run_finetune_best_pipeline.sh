@@ -10,7 +10,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."  # -> molhiv_tda project root
-CONFIG="${CONFIG:-pdgnn_han_finetune_3d_elec}"
+CONFIG="${CONFIG:-pdgnn_han_finetune_3d_elec_multifilt}"
 SWEEP_DIR="results/sweep/${CONFIG}_hantune"
 SUMMARY="$SWEEP_DIR/_summary.json"
 BACKBONE_CKPT="results/pdgnn_tda_3d_elec_best.pt"

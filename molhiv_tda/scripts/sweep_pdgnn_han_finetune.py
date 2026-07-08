@@ -97,7 +97,7 @@ def _run_pool(jobs, max_parallel: int):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="pdgnn_han_finetune_3d_elec")
+    parser.add_argument("--config", type=str, default="pdgnn_han_finetune_3d_elec_multifilt")
     parser.add_argument("--backbone-ckpt", type=str, required=True,
                         help="Fixed frozen PDGNN checkpoint used by every run.")
     parser.add_argument("--epochs", type=int, default=50)
