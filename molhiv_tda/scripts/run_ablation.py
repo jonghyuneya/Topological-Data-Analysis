@@ -24,7 +24,7 @@ EXPERIMENTS = [
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--skip-preprocess", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

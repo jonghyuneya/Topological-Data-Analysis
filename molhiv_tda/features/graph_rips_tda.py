@@ -20,7 +20,7 @@ import torch
 from ogb.utils.features import allowable_features
 from torch_geometric.data import Data
 
-from config import GRAPH_RIPS_DIM, GRAPH_RIPS_SIGMA, PI_RESOLUTION, RIPS_HOP_MAX
+from config import GRAPH_RIPS_DIM, PI_RESOLUTION, PI_SIGMA, RIPS_HOP_MAX
 from features.tda_utils import PersistencePoint, persistence_image
 
 _BOND_TYPE_LIST = [str(b).upper() for b in allowable_features["possible_bond_type_list"]]
@@ -76,7 +76,7 @@ def compute_graph_rips_vector(
     data: Data,
     aromatic_only: bool = False,
     resolution: int = PI_RESOLUTION,
-    sigma: float = GRAPH_RIPS_SIGMA,
+    sigma: float = PI_SIGMA,
 ) -> np.ndarray:
     """Persistence-image vector (H0 + H1) for a hop-distance Rips filtration."""
     if data.edge_index.numel() == 0:

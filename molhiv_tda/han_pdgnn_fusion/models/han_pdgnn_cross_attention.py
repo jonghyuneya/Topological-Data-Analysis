@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn import global_add_pool, global_max_pool, global_mean_pool
 
-from hetero_transform import homo_to_hetero, scatter_batched_hetero_to_homo
+from hetero_transform import homo_to_hetero
 from models.cross_attention_fusion import FusionMLP, GraphwiseCrossAttention
 from models.han_encoder import HANEncoder
 from models.pdgnn_filtration_encoder import PDGNNFiltrationEncoder
@@ -75,24 +75,28 @@ class HANPDGNNCrossAttentionModel(nn.Module):
         )
 
     def encode_han(self, data: Batch) -> torch.Tensor:
-        device = data.x.device
-        hetero_list = getattr(data, "hetero_list", None)
-        if hetero_list is not None and len(hetero_list) == data.num_graphs:
-            hetero_batch = Batch.from_data_list([h.to(device) for h in hetero_list])
-        else:
-            hetero_batch = Batch.from_data_list(
-                [
-                    homo_to_hetero(
-                        _extract_molecular_subgraph(data, i),
-                        node_type_mode=self.node_type_mode,
-                    )[0].to(device)
-                    for i in range(data.num_graphs)
-                ]
-            )
+        hetero_list = getattr(data, "hetero_data", None)
+        if hetero_list is None:
+            z_parts = []
+            for i in range(data.num_graphs):
+                sub = _extract_molecular_subgraph(data, i)
+                hetero, _ = homo_to_hetero(sub, node_type_mode=self.node_type_mode)
+                hetero = hetero.to(data.x.device)
+                z_parts.append(self.han_encoder(hetero, hetero.num_nodes))
+            return torch.cat(z_parts, dim=0)
+
+        # Batch all per-graph hetero graphs into one and run HAN once instead of
+        # looping per graph (32x fewer, much larger GPU kernel launches per step).
+        hetero_batch = Batch.from_data_list(hetero_list).to(data.x.device)
         typed = self.han_encoder.encode_hetero(hetero_batch)
-        return scatter_batched_hetero_to_homo(
-            typed, hetero_batch, data.ptr, data.num_nodes, device
-        )
+        out = torch.zeros(data.num_nodes, self.han_encoder.hidden_dim, device=data.x.device)
+        for ntype, emb in typed.items():
+            store = hetero_batch[ntype]
+            if not hasattr(store, "global_index"):
+                continue
+            abs_index = data.ptr[store.batch] + store.global_index
+            out[abs_index] = emb
+        return out
 
     def forward(self, data: Batch) -> torch.Tensor:
         Z = self.encode_han(data)
@@ -100,15 +104,7 @@ class HANPDGNNCrossAttentionModel(nn.Module):
         L = self.fusion(Z, H)
 
         if self.use_cross_attention:
-            R = self.cross_attn(
-                L,
-                Z,
-                H,
-                data.batch,
-                data.edge_index,
-                data.edge_attr,
-                ptr=data.ptr,
-            )
+            R = self.cross_attn(L, Z, H, data.batch)
         else:
             R = L
 

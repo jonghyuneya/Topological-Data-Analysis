@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Precompute hop-distance Rips TDA features (multifiltration lenses A and B)."""
+"""Precompute hop-distance Rips TDA features (lenses A and B)."""
 from __future__ import annotations
 
 import argparse

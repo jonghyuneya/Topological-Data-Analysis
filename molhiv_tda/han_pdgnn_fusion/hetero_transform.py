@@ -1,33 +1,16 @@
 """Convert homogeneous molecular graphs to exact-atom-type HeteroData."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
 from ogb.utils.features import allowable_features
 from torch_geometric.data import Data, HeteroData
+from tqdm.auto import tqdm
 
-_RAW_ATOMIC_ENTRIES = list(allowable_features["possible_atomic_num_list"])
+ATOMIC_NUM_LIST: List[int] = list(allowable_features["possible_atomic_num_list"])
 BOND_TYPE_LIST: List[str] = list(allowable_features["possible_bond_type_list"])
-
-
-def _atomic_z_from_feature_index(idx: int) -> int:
-    """Map OGB atom feature column-0 index to atomic number Z."""
-    if idx < 0 or idx >= len(_RAW_ATOMIC_ENTRIES):
-        raise ValueError(f"Invalid atomic number index {idx}")
-    val = _RAW_ATOMIC_ENTRIES[idx]
-    if isinstance(val, str):
-        if val.isdigit():
-            return int(val)
-        # OGB uses 'misc' for out-of-vocabulary atoms.
-        return 6
-    return int(val)
-
-
-ATOMIC_NUM_LIST: List[int] = [_atomic_z_from_feature_index(i) for i in range(len(_RAW_ATOMIC_ENTRIES))]
-
-# Index → atomic number lookup (CPU); safe for DataLoader workers.
-_ATOMIC_IDX_TO_Z = torch.tensor(ATOMIC_NUM_LIST, dtype=torch.long)
 
 # Approximate mass number lookup (integer amu) for optional node typing.
 ATOMIC_MASS_LOOKUP: Dict[int, int] = {
@@ -47,7 +30,9 @@ ATOMIC_MASS_LOOKUP: Dict[int, int] = {
 def decode_atomic_number(atom_feature_row: torch.Tensor) -> int:
     """Decode OGB categorical atom feature column 0 to atomic number Z."""
     idx = int(atom_feature_row[0].item())
-    return _atomic_z_from_feature_index(idx)
+    if idx < 0 or idx >= len(ATOMIC_NUM_LIST):
+        raise ValueError(f"Invalid atomic number index {idx}")
+    return int(ATOMIC_NUM_LIST[idx])
 
 
 def atomic_number_to_mass_number(z: int) -> int:
@@ -76,8 +61,11 @@ def bond_to_edge_type(edge_attr_row: torch.Tensor) -> str:
 
 
 def compute_atomic_numbers(data: Data) -> torch.Tensor:
-    idx = data.x[:, 0].long().clamp(0, len(ATOMIC_NUM_LIST) - 1)
-    return _ATOMIC_IDX_TO_Z.to(idx.device)[idx]
+    return torch.tensor(
+        [decode_atomic_number(data.x[i]) for i in range(data.num_nodes)],
+        dtype=torch.long,
+        device=data.x.device,
+    )
 
 
 def homo_to_hetero(
@@ -144,6 +132,35 @@ def homo_to_hetero(
     return hetero, aux
 
 
+def build_hetero_cache(
+    dataset,
+    indices: List[int],
+    node_type_mode: str = "atomic_number",
+) -> Dict[int, HeteroData]:
+    """Precompute homo_to_hetero once per graph so it isn't redone every epoch."""
+    cache: Dict[int, HeteroData] = {}
+    for graph_idx in tqdm(indices, desc="hetero-cache"):
+        data = dataset[graph_idx]
+        hetero, _ = homo_to_hetero(data, node_type_mode=node_type_mode)
+        cache[int(graph_idx)] = hetero
+    return cache
+
+
+def load_or_build_hetero_cache(
+    cache_path: str | Path,
+    dataset,
+    indices: List[int],
+    node_type_mode: str = "atomic_number",
+) -> Dict[int, HeteroData]:
+    cache_path = Path(cache_path)
+    if cache_path.exists():
+        return torch.load(cache_path, weights_only=False)
+    cache = build_hetero_cache(dataset, indices, node_type_mode=node_type_mode)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(cache, cache_path)
+    return cache
+
+
 def hetero_node_embeddings_to_homo(
     typed_embeddings: Dict[str, torch.Tensor],
     hetero: HeteroData,
@@ -157,27 +174,5 @@ def hetero_node_embeddings_to_homo(
         if not hasattr(hetero[ntype], "global_index"):
             continue
         global_idx = hetero[ntype].global_index.to(device)
-        out[global_idx] = emb
-    return out
-
-
-def scatter_batched_hetero_to_homo(
-    typed_embeddings: Dict[str, torch.Tensor],
-    batch_hetero: HeteroData,
-    ptr: torch.Tensor,
-    num_nodes: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Map batched HeteroData node embeddings back to PyG Batch node order."""
-    hidden_dim = next(iter(typed_embeddings.values())).size(-1)
-    out = torch.zeros(num_nodes, hidden_dim, device=device)
-    ptr = ptr.to(device)
-    for ntype, emb in typed_embeddings.items():
-        store = batch_hetero[ntype]
-        if not hasattr(store, "global_index"):
-            continue
-        g_ids = store.batch.to(device)
-        local_idx = store.global_index.to(device)
-        global_idx = ptr[g_ids] + local_idx
         out[global_idx] = emb
     return out

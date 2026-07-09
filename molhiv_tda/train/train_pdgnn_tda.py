@@ -20,7 +20,6 @@ from config import (
     DROPOUT,
     EMB_DIM,
     EDGE_DIST_CACHE,
-    EDGE_ELECTRO_CACHE,
     EPOCHS,
     MW_CACHE,
     NUM_BACKBONE_LAYERS,
@@ -58,15 +57,6 @@ CONFIGS = {
         use_edge_dist=True,
         label="PDGNN (3D dist filtration) + bond-weighted MW",
     ),
-    "pdgnn_tda_3d_elec": dict(
-        model="pdgnn_tda",
-        use_bond_tda=True,
-        use_mw=False,
-        use_tda_3d=True,
-        use_edge_electro=True,
-        balance_test=True,
-        label="PDGNN + BondTDA + 3DTDA + ElectroEdge",
-    ),
 }
 
 
@@ -82,24 +72,6 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--dropout", type=float, default=DROPOUT)
-    parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
-    parser.add_argument(
-        "--out",
-        type=str,
-        default=None,
-        help="Output JSON path (default: results/{config}.json). Use to avoid clobbering during sweeps.",
-    )
-    parser.add_argument(
-        "--save-ckpt",
-        type=str,
-        default=None,
-        help="If set, save the best model state_dict to this path (e.g. results/pdgnn_tda_3d_elec_best.pt).",
-    )
-    parser.add_argument(
-        "--balanced-train",
-        action="store_true",
-        help="Train with ~1:1 pos/neg per epoch (minority oversampling).",
-    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -113,14 +85,12 @@ def main():
         batch_size=args.batch_size,
         max_samples=args.max_samples,
         num_workers=args.num_workers if device.type == "cuda" else 0,
-        balanced_train=args.balanced_train,
     )
 
     bond_tda = load_feature_tensor(BOND_TDA_CACHE, len(dataset), BOND_TDA_DIM) if cfg.get("use_bond_tda") else None
     mw = load_feature_tensor(MW_CACHE, len(dataset), 1) if cfg.get("use_mw") else None
     tda_3d = load_feature_tensor(TDA_3D_CACHE, len(dataset), TDA_3D_DIM) if cfg.get("use_tda_3d") else None
     edge_dist_bank = None
-    edge_phys_bank = None
 
     if cfg.get("use_bond_tda") and not BOND_TDA_CACHE.exists():
         raise FileNotFoundError(f"Missing {BOND_TDA_CACHE}. Run scripts/preprocess_bond_tda.py first.")
@@ -134,13 +104,6 @@ def main():
                 f"Missing {EDGE_DIST_CACHE}. Run scripts/preprocess_3d_edge_dist.py first."
             )
         edge_dist_bank = load_edge_dist_bank(EDGE_DIST_CACHE)
-    if cfg.get("use_edge_electro"):
-        if not EDGE_ELECTRO_CACHE.exists():
-            raise FileNotFoundError(
-                f"Missing {EDGE_ELECTRO_CACHE}. Run scripts/preprocess_edge_electrostatic.py first."
-            )
-        obj = torch.load(EDGE_ELECTRO_CACHE, weights_only=False)
-        edge_phys_bank = obj["edge_phys"] if isinstance(obj, dict) else obj
 
     if cfg["model"] == "pdgnn_3d_dist_mw":
         model = PDGNN3DDistMW(
@@ -161,20 +124,7 @@ def main():
             use_mw=cfg.get("use_mw", False),
             use_tda_3d=cfg.get("use_tda_3d", False),
             tda_3d_dim=TDA_3D_DIM,
-            use_edge_electro=cfg.get("use_edge_electro", False),
-            edge_phys_dim=2,
         ).to(device)
-        if edge_phys_bank is not None:
-            # Rebuild loaders with per-edge physics attached to each graph.
-            loaders = make_loaders(
-                dataset,
-                split_idx,
-                batch_size=args.batch_size,
-                max_samples=args.max_samples,
-                num_workers=args.num_workers if device.type == "cuda" else 0,
-                edge_phys_bank=edge_phys_bank,
-                balanced_train=args.balanced_train,
-            )
 
     metrics = run_training(
         model,
@@ -184,14 +134,11 @@ def main():
         epochs=args.epochs,
         patience=PATIENCE,
         lr=args.lr,
-        weight_decay=args.weight_decay,
+        weight_decay=WEIGHT_DECAY,
         bond_tda=bond_tda,
         mw=mw,
         tda_3d=tda_3d,
         edge_dist_bank=edge_dist_bank,
-        balance_test=cfg.get("balance_test", False),
-        test_balance_seed=args.seed,
-        save_ckpt=args.save_ckpt,
     )
 
     result = {
@@ -201,19 +148,13 @@ def main():
         "molecular_weight": cfg.get("use_mw", False),
         "tda_3d": cfg.get("use_tda_3d", False),
         "edge_dist_filtration": cfg.get("use_edge_dist", False),
-        "electro_edge": cfg.get("use_edge_electro", False),
-        "balanced_test_eval": cfg.get("balance_test", False),
-        "balanced_train": args.balanced_train,
-        "config": args.config,
         "lr": args.lr,
         "dropout": args.dropout,
-        "weight_decay": args.weight_decay,
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
         "seed": args.seed,
         **metrics,
     }
-    out = Path(args.out) if args.out else RESULTS_ROOT / f"{args.config}.json"
+    seed_suffix = "" if args.seed == 0 else f"_seed{args.seed}"
+    out = RESULTS_ROOT / f"{args.config}{seed_suffix}.json"
     save_result(result, out)
     print(result)
     print(f"Saved to {out}")

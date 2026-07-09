@@ -9,6 +9,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import functools
+
 import torch
 
 from config import (
@@ -17,7 +19,6 @@ from config import (
     DROPOUT,
     EMB_DIM,
     EPOCHS,
-    EDGE_ELECTRO_CACHE,
     NUM_BACKBONE_LAYERS,
     NUM_WORKERS,
     PATIENCE,
@@ -27,7 +28,7 @@ from config import (
 )
 from data.load_molhiv import load_molhiv, make_loaders
 from models.pdgnn_baseline import PDGNNBaseline
-from train.train_utils import run_training, save_result
+from train.train_utils import focal_loss_with_logits, run_training, save_result
 from utils.device import device_label, resolve_device
 
 
@@ -41,11 +42,11 @@ def main():
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-samples", type=int, default=None, help="Use subset for quick dev runs")
-    parser.add_argument(
-        "--use-electro-edge",
-        action="store_true",
-        help="Use cached edge physics [distance, coulomb] from RDKit.",
-    )
+    parser.add_argument("--lr", type=float, default=LR)
+    parser.add_argument("--dropout", type=float, default=DROPOUT)
+    parser.add_argument("--loss", type=str, default="bce", choices=["bce", "focal"])
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--focal-alpha", type=float, default=0.25)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -53,29 +54,25 @@ def main():
     print(f"Using device: {device_label(device)}")
 
     dataset, split_idx, evaluator, _ = load_molhiv(args.dataset_root)
-    edge_phys_bank = None
-    if args.use_electro_edge:
-        if not EDGE_ELECTRO_CACHE.exists():
-            raise FileNotFoundError(
-                f"Missing {EDGE_ELECTRO_CACHE}. Run scripts/preprocess_edge_electrostatic.py first."
-            )
-        obj = torch.load(EDGE_ELECTRO_CACHE, weights_only=False)
-        edge_phys_bank = obj["edge_phys"] if isinstance(obj, dict) else obj
     loaders = make_loaders(
         dataset, split_idx,
         batch_size=args.batch_size,
         max_samples=args.max_samples,
         num_workers=args.num_workers if device.type == "cuda" else 0,
-        edge_phys_bank=edge_phys_bank,
     )
 
     model = PDGNNBaseline(
         num_tasks=dataset.num_tasks,
         num_layers=NUM_BACKBONE_LAYERS,
         emb_dim=EMB_DIM,
-        dropout=DROPOUT,
-        edge_phys_dim=2 if args.use_electro_edge else 0,
+        dropout=args.dropout,
     ).to(device)
+
+    loss_fn = None
+    if args.loss == "focal":
+        loss_fn = functools.partial(
+            focal_loss_with_logits, gamma=args.focal_gamma, alpha=args.focal_alpha
+        )
 
     metrics = run_training(
         model,
@@ -84,8 +81,9 @@ def main():
         device,
         epochs=args.epochs,
         patience=PATIENCE,
-        lr=LR,
+        lr=args.lr,
         weight_decay=WEIGHT_DECAY,
+        loss_fn=loss_fn,
     )
 
     result = {
@@ -94,10 +92,15 @@ def main():
         "bond_type_tda": False,
         "molecular_weight": False,
         "tda_3d": False,
-        "electro_edge": args.use_electro_edge,
+        "lr": args.lr,
+        "dropout": args.dropout,
+        "loss": args.loss,
+        "seed": args.seed,
         **metrics,
     }
-    out = RESULTS_ROOT / "pdgnn_baseline.json"
+    suffix = "" if args.loss == "bce" else f"_{args.loss}"
+    seed_suffix = "" if args.seed == 0 else f"_seed{args.seed}"
+    out = RESULTS_ROOT / f"pdgnn_lr{args.lr}_dropout{args.dropout}{suffix}{seed_suffix}.json"
     save_result(result, out)
     print(result)
     print(f"Saved to {out}")

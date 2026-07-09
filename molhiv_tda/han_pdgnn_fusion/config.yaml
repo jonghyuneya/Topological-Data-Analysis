@@ -13,7 +13,6 @@ batch_size: 32
 epochs: 100
 patience: 10
 num_workers: 0
-preload_hetero: true  # applied only when num_workers is 0
 
 filtration_taus: [1.0, 1.5, 2.0, 3.0]
 bond_filtration_scores:
